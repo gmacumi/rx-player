@@ -282,6 +282,7 @@ export default class SmoothRepresentationIndex
   implements IRepresentationIndex {
 
     private readonly _isDynamic : boolean;
+    private _liveGapOffset : number = 0;
     private _codecPrivateData? : string;
     private _bitsPerSample? : number;
     private _channels? : number;
@@ -507,6 +508,10 @@ export default class SmoothRepresentationIndex
       return (getTimelineRangeEnd(lastTimelineElement) / index.timescale);
     }
 
+    setLiveGapOffset(offset: number) {
+      this._liveGapOffset += offset;
+    }
+
     /**
      * Checks if the time given is in a discontinuity. That is:
      *   - We're on the upper bound of the current range (end of the range - time
@@ -662,7 +667,7 @@ export default class SmoothRepresentationIndex
         this._isDynamic &&
         duration &&
         lastReference &&
-        time + duration > lastReference * this._index.timescale
+        time + duration > (lastReference - this._liveGapOffset) * this._index.timescale
       );
     }
 }

@@ -117,6 +117,8 @@ export default interface IRepresentationIndex {
    */
   checkDiscontinuity(time : number) : number;
 
+  setLiveGapOffset?(offset: number) : void;
+
   /**
    * Update the index with another one, such as after a Manifest update.
    * TODO Both this and _addSegments mutate the index. They should not be

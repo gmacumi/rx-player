@@ -17,8 +17,10 @@
 import {
   Observable,
   of as observableOf,
+  EMPTY,
+  Subject,
 } from "rxjs";
-import { map } from "rxjs/operators";
+import { map, catchError, finalize } from "rxjs/operators";
 import features from "../../features";
 import log from "../../log";
 import Manifest, {
@@ -160,13 +162,27 @@ export default function(
       segment,
     } : ISegmentLoaderArguments
     ) : ILoaderObservable<ArrayBuffer|Uint8Array|null> {
+      const cancelRequest$ = new Subject<unknown>();
       return segmentLoader({
         adaptation,
         manifest,
         period,
         representation,
         segment,
-      });
+      }).pipe(
+        catchError((error: { message: string; status?: number }) => {
+          if (error.message === "ERROR_HTTP_CODE" && error.status === 412) {
+            cancelRequest$.next();
+            const offset = segment.duration != null ? segment.duration : 2;
+            if (representation.index.setLiveGapOffset) {
+              representation.index.setLiveGapOffset(offset);
+            }
+            return EMPTY;
+          }
+          throw error;
+        }),
+        finalize(() => cancelRequest$.complete())
+      );
     },
 
     parser({
