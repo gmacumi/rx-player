@@ -43,7 +43,8 @@ export interface IResource {
 }
 
 export interface IParseOptions {
-  loadExternalUTCTimings: boolean;
+  manifestURI : string;
+  loadExternalClock : boolean;
 }
 
 export type IParserResponse<T> =
@@ -61,30 +62,29 @@ export type IParserResponse<T> =
 
 /**
  * @param {Element} root - The MPD root.
- * @param {string} url - The url where the MPD is located
+ * @param {Object} options
  * @returns {Object}
  */
 export default function parseMPD(
   root : Element,
-  uri : string,
-  options? : IParseOptions
+  options : IParseOptions
 ) : IParserResponse<IParsedManifest> {
   // Transform whole MPD into a parsed JS object representation
   const mpdIR = createMPDIntermediateRepresentation(root);
-  return loadExternalRessourcesAndParse(mpdIR, uri, options);
+  return loadExternalRessourcesAndParse(mpdIR, options);
 }
 
 /**
  * Checks if xlinks needs to be loaded before actually parsing the manifest.
  * @param {Object} mpdIR
- * @param {string} uri
+ * @param {Object} options
  * @returns {Object}
  */
 function loadExternalRessourcesAndParse(
   mpdIR : IMPDIntermediateRepresentation,
-  uri : string,
-  options : IParseOptions = {loadExternalUTCTimings: true}
+  options : IParseOptions
 ) : IParserResponse<IParsedManifest> {
+  const { manifestURI, loadExternalClock } = options;
   const xlinksToLoad : Array<{ index : number; ressource : string }> = [];
   for (let i = 0; i < mpdIR.children.periods.length; i++) {
     const { xlinkHref, xlinkActuate } = mpdIR.children.periods[i].attributes;
@@ -93,13 +93,13 @@ function loadExternalRessourcesAndParse(
     }
   }
 
-  const utcTimingsToLoad = options.loadExternalUTCTimings
-      ? mpdIR.children.utcTimings.filter(utcTiming =>
-        utcTiming.schemeIdUri === "urn:mpeg:dash:utc:http-iso:2014"
-      ) : [];
+  const utcTimingsToLoad = loadExternalClock ?
+    mpdIR.children.utcTimings.filter(utcTiming =>
+      utcTiming.schemeIdUri === "urn:mpeg:dash:utc:http-iso:2014") :
+    [];
 
   if (xlinksToLoad.length === 0 && utcTimingsToLoad.length === 0) {
-    const parsedManifest = parseCompleteIntermediateRepresentation(mpdIR, uri);
+    const parsedManifest = parseCompleteIntermediateRepresentation(mpdIR, manifestURI);
     return { type: "done", value: parsedManifest };
   }
 
@@ -148,7 +148,7 @@ function loadExternalRessourcesAndParse(
           utcTiming.value = loadedRessources[xlinksToLoad.length + j];
         }
 
-        return loadExternalRessourcesAndParse(mpdIR, uri);
+        return loadExternalRessourcesAndParse(mpdIR, options);
       },
     },
   };
