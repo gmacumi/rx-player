@@ -15,7 +15,6 @@
  */
 
 import config from "../../../config";
-import log from "../../../log";
 import arrayFind from "../../../utils/array_find";
 import idGenerator from "../../../utils/id_generator";
 import resolveURL, {
@@ -23,6 +22,7 @@ import resolveURL, {
 } from "../../../utils/resolve_url";
 import { IParsedManifest } from "../types";
 import checkManifestIDs from "../utils/check_manifest_ids";
+import getLastTimeReference from "./get_last_time_reference";
 import getPresentationLiveGap from "./get_presentation_live_gap";
 import {
   createMPDIntermediateRepresentation,
@@ -32,15 +32,9 @@ import {
   createPeriodIntermediateRepresentation,
   IPeriodIntermediateRepresentation,
 } from "./node_parsers/Period";
-import { IScheme } from "./node_parsers/utils";
 import parsePeriods from "./parse_periods";
 
 const generateManifestID = idGenerator();
-
-export interface IResource {
-  type: "xlink" | "http-iso";
-  url: string;
-}
 
 export interface IParseOptions {
   manifestURI : string;
@@ -51,7 +45,7 @@ export type IParserResponse<T> =
   {
     type : "needs-ressources";
     value : {
-      ressources : IResource[];
+      ressources : string[];
       continue : (loadedRessources : string[]) => IParserResponse<T>;
     };
   } |
@@ -84,7 +78,6 @@ function loadExternalRessourcesAndParse(
   mpdIR : IMPDIntermediateRepresentation,
   options : IParseOptions
 ) : IParserResponse<IParsedManifest> {
-  const { manifestURI, loadExternalClock } = options;
   const xlinksToLoad : Array<{ index : number; ressource : string }> = [];
   for (let i = 0; i < mpdIR.children.periods.length; i++) {
     const { xlinkHref, xlinkActuate } = mpdIR.children.periods[i].attributes;
@@ -93,35 +86,22 @@ function loadExternalRessourcesAndParse(
     }
   }
 
-  const utcTimingsToLoad = loadExternalClock ?
-    mpdIR.children.utcTimings.filter(utcTiming =>
-      utcTiming.schemeIdUri === "urn:mpeg:dash:utc:http-iso:2014") :
-    [];
-
-  if (xlinksToLoad.length === 0 && utcTimingsToLoad.length === 0) {
-    const parsedManifest = parseCompleteIntermediateRepresentation(mpdIR, manifestURI);
-    return { type: "done", value: parsedManifest };
+  if (xlinksToLoad.length === 0) {
+    return parseCompleteIntermediateRepresentation(mpdIR, options);
   }
 
   return {
     type: "needs-ressources",
     value: {
-      ressources: [
-        ...xlinksToLoad.map<IResource>(
-          ({ ressource }) => ({ type: "xlink", url: ressource})
-        ),
-        ...utcTimingsToLoad.map<IResource>(
-          ({ value }) => ({ type: "http-iso", url: value || ""})
-        ),
-      ],
+      ressources: xlinksToLoad.map(({ ressource }) => ressource),
       continue: function continueParsingMPD(loadedRessources : string[]) {
-        if (loadedRessources.length !== (xlinksToLoad.length + utcTimingsToLoad.length)) {
+        if (loadedRessources.length !== xlinksToLoad.length) {
           throw new Error("DASH parser: wrong number of loaded ressources.");
         }
 
         // Note: It is important to go from the last index to the first index in
         // the resulting array, as we will potentially add elements to the array
-        for (let i = xlinksToLoad.length - 1; i >= 0; i--) {
+        for (let i = loadedRessources.length - 1; i >= 0; i--) {
           const index = xlinksToLoad[i].index;
           const xlinkData = loadedRessources[i];
           const wrappedData = "<root>" + xlinkData + "</root>";
@@ -141,13 +121,6 @@ function loadExternalRessourcesAndParse(
           mpdIR.children.periods.splice(index, 1, ...periodsIR);
         }
 
-        for (let j = 0; j < utcTimingsToLoad.length; j++) {
-          const utcTiming = utcTimingsToLoad[j];
-          utcTiming.schemeIdUri = "urn:mpeg:dash:utc:direct:2014";
-
-          utcTiming.value = loadedRessources[xlinksToLoad.length + j];
-        }
-
         return loadExternalRessourcesAndParse(mpdIR, options);
       },
     },
@@ -162,14 +135,14 @@ function loadExternalRessourcesAndParse(
  */
 function parseCompleteIntermediateRepresentation(
   mpdIR : IMPDIntermediateRepresentation,
-  uri : string
-) : IParsedManifest {
+  { manifestURI, loadExternalClock } : IParseOptions
+) : IParserResponse<IParsedManifest> {
   const {
     children: rootChildren,
     attributes: rootAttributes,
   } = mpdIR;
 
-  const baseURL = resolveURL(normalizeBaseURL(uri), rootChildren.baseURL);
+  const baseURL = resolveURL(normalizeBaseURL(manifestURI), rootChildren.baseURL);
 
   const isDynamic : boolean = rootAttributes.type === "dynamic";
   const availabilityStartTime = (
@@ -202,22 +175,15 @@ function parseCompleteIntermediateRepresentation(
     return undefined;
   })();
 
-  const getClockOffsetFromUTCTimings = (utcTimings: IScheme[]) => {
-    const firstDirectUTCTiming = arrayFind(
-      utcTimings,
-      (utcTiming) => utcTiming.schemeIdUri === "urn:mpeg:dash:utc:direct:2014"
-    );
+  const directTiming = arrayFind(rootChildren.utcTimings,
+    (utcTiming) =>
+      utcTiming.schemeIdUri === "urn:mpeg:dash:utc:direct:2014" &&
+      utcTiming.value != null
+  );
 
-    if (firstDirectUTCTiming && firstDirectUTCTiming.value) {
-      try {
-        return Date.now() - Date.parse(firstDirectUTCTiming.value);
-      } catch (e) {
-        log.warn("Failed to parse first direct UTC Timing in dash manifest:", e);
-      }
-    }
-
-    return undefined;
-  };
+  // second condition not needed but TS did not help there, even with a `is`
+  const directClockOffset = directTiming != null && directTiming.value != null ?
+    Date.now() - Date.parse(directTiming.value) : undefined;
 
   const parsedMPD : IParsedManifest = {
     availabilityStartTime,
@@ -228,11 +194,12 @@ function parseCompleteIntermediateRepresentation(
     periods: parsedPeriods,
     transportType: "dash",
     isLive: isDynamic,
-    uris: [uri, ...rootChildren.locations],
+    uris: [manifestURI, ...rootChildren.locations],
     suggestedPresentationDelay: rootAttributes.suggestedPresentationDelay != null ?
       rootAttributes.suggestedPresentationDelay :
       config.DEFAULT_SUGGESTED_PRESENTATION_DELAY.DASH,
-    clockOffset: getClockOffsetFromUTCTimings(rootChildren.utcTimings),
+    clockOffset: directClockOffset != null && !isNaN(directClockOffset) ?
+      directClockOffset : undefined,
   };
 
   // -- add optional fields --
@@ -250,7 +217,51 @@ function parseCompleteIntermediateRepresentation(
 
   checkManifestIDs(parsedMPD);
   if (parsedMPD.isLive) {
-    parsedMPD.presentationLiveGap = getPresentationLiveGap(parsedMPD);
+    const lastTimeReference = getLastTimeReference(parsedMPD);
+    if (directClockOffset == null && lastTimeReference == null && loadExternalClock) {
+      const UTCTimingHTTPURL = getHTTPUTCTimingURL(mpdIR);
+      if (UTCTimingHTTPURL != null && UTCTimingHTTPURL.length > 0) {
+        return {
+          type: "needs-ressources",
+          value: {
+            ressources: [UTCTimingHTTPURL],
+            continue: function continueParsingMPD(loadedRessources : string[]) {
+              if (loadedRessources.length !== 1) {
+                throw new Error("DASH parser: wrong number of loaded ressources.");
+              }
+
+              const httpOffset = Date.now() - Date.parse(loadedRessources[0]);
+              parsedMPD.clockOffset = isNaN(httpOffset) ? undefined : httpOffset;
+              parsedMPD.presentationLiveGap =
+                getPresentationLiveGap(parsedMPD, lastTimeReference);
+              return { type: "done", value: parsedMPD };
+            },
+          },
+        };
+      }
+    }
+    parsedMPD.presentationLiveGap = getPresentationLiveGap(parsedMPD, lastTimeReference);
   }
-  return parsedMPD;
+
+  return { type: "done", value: parsedMPD };
+}
+
+/**
+ * @param {Object} mpdIR
+ * @returns {string|undefined}
+ */
+function getHTTPUTCTimingURL(
+  mpdIR : IMPDIntermediateRepresentation
+) : string|undefined {
+  const UTCTimingHTTP = mpdIR.children.utcTimings
+    .filter((utcTiming) : utcTiming is {
+      schemeIdUri : "urn:mpeg:dash:utc:http-iso:2014";
+      value : string;
+    } =>
+      utcTiming.schemeIdUri === "urn:mpeg:dash:utc:http-iso:2014" &&
+      utcTiming.value != null
+    );
+
+  return UTCTimingHTTP.length > 0 ?
+    UTCTimingHTTP[0].value : undefined;
 }
