@@ -24,7 +24,6 @@ export type IMPDParserResponse = IParserResponse<IParsedManifest>;
 
 /**
  * @param {Document} manifest - Original manifest as returned by the server
- * @param {string} uri
  * @param {Object} options - Parse options
  * @returns {Object} - parsed manifest
  */
